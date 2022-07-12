@@ -9,7 +9,6 @@ stdlibs = [
     :LibUV_jll,
     :LibUnwind_jll,
     :MbedTLS_jll,
-    :OpenLibm_jll,
     :PCRE2_jll,
     :Zlib_jll,
     :dSFMT_jll,

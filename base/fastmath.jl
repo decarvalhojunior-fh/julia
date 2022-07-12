@@ -175,6 +175,12 @@ mul_fast(x::T, y::T) where {T<:FloatTypes} = mul_float_fast(x, y)
 div_fast(x::T, y::T) where {T<:FloatTypes} = div_float_fast(x, y)
 rem_fast(x::T, y::T) where {T<:FloatTypes} = rem_float_fast(x, y)
 
+# Workaround for win32 as discussed #42299
+if Int === Int32
+    rem_fast(x::Float32, y::Float32) = Float32(rem_float_fast(Float64(x), Float64(y)))
+    rem_fast(x::Float16, y::Float16) = Float16(rem_float_fast(Float64(x), Float64(y)))
+end
+
 add_fast(x::T, y::T, zs::T...) where {T<:FloatTypes} =
     add_fast(add_fast(x, y), zs...)
 mul_fast(x::T, y::T, zs::T...) where {T<:FloatTypes} =
