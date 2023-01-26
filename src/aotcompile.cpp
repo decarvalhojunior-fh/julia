@@ -1323,7 +1323,7 @@ void jl_dump_native_impl(void *native_code,
             !!unopt_bc_fname, !!bc_fname, !!obj_fname, !!asm_fname,
             threads
     ); };
-    
+
     std::array<StringRef, 4> text_names = {
         "text_unopt.bc",
         "text_opt.bc",
