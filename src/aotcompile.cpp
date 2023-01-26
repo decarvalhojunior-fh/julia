@@ -66,6 +66,7 @@ using namespace llvm;
 #include "serialize.h"
 #include "julia_assert.h"
 #include "llvm-codegen-shared.h"
+#include "processor.h"
 
 #define DEBUG_TYPE "julia_aotcompile"
 
@@ -741,9 +742,19 @@ static SmallVector<Partition, 32> partitionModule(Module &M, unsigned threads) {
         pq.push(&partitions[i]);
     }
 
+    std::vector<unsigned> idxs(partitioner.nodes.size());
+    std::iota(idxs.begin(), idxs.end(), 0);
+    std::sort(idxs.begin(), idxs.end(), [&](unsigned a, unsigned b) {
+        //because roots have more weight than their children,
+        //we can sort by weight and get the roots first
+        return partitioner.nodes[a].weight > partitioner.nodes[b].weight;
+    });
+
     // Assign the root of each partition to a partition, then assign its children to the same one
-    for (unsigned i = 0; i < partitioner.nodes.size(); ++i) {
+    for (unsigned idx = 0; idx < idxs.size(); ++idx) {
+        auto i = idxs[idx];
         auto root = partitioner.find(i);
+        assert(root == i || partitioner.nodes[root].GV == nullptr);
         if (partitioner.nodes[root].GV) {
             auto &node = partitioner.nodes[root];
             auto &P = *pq.top();
@@ -781,9 +792,10 @@ static SmallVector<Partition, 32> partitionModule(Module &M, unsigned threads) {
     return partitions;
 }
 
-static void add_output_impl(Module &M, TargetMachine &SourceTM, std::string *outputs, StringRef name,
+static void add_output_impl(Module &M, TargetMachine &SourceTM, std::string *outputs, ArrayRef<StringRef> names,
                     NewArchiveMember *unopt, NewArchiveMember *opt, NewArchiveMember *obj, NewArchiveMember *asm_,
                     std::stringstream &stream, unsigned i) {
+    assert(names.size() == 4);
     auto TM = std::unique_ptr<TargetMachine>(
         SourceTM.getTarget().createTargetMachine(
             SourceTM.getTargetTriple().str(),
@@ -800,9 +812,7 @@ static void add_output_impl(Module &M, TargetMachine &SourceTM, std::string *out
         AnalysisManagers AM{*TM, PB, OptimizationLevel::O0};
         ModulePassManager MPM;
         MPM.addPass(BitcodeWriterPass(OS));
-        outputs++;
-        *outputs = (name + "_unopt.bc").str();
-        *unopt = NewArchiveMember(MemoryBufferRef(OS.str(), *outputs));
+        *unopt = NewArchiveMember(MemoryBufferRef(*outputs, names[0]));
         outputs++;
     }
     if (!opt && !obj && !asm_) {
@@ -844,9 +854,7 @@ static void add_output_impl(Module &M, TargetMachine &SourceTM, std::string *out
         AnalysisManagers AM{*TM, PB, OptimizationLevel::O0};
         ModulePassManager MPM;
         MPM.addPass(BitcodeWriterPass(OS));
-        outputs++;
-        *outputs = (name + "_opt.bc").str();
-        *opt = NewArchiveMember(MemoryBufferRef(OS.str(), *outputs));
+        *opt = NewArchiveMember(MemoryBufferRef(*outputs, names[1]));
         outputs++;
     }
 
@@ -861,9 +869,7 @@ static void add_output_impl(Module &M, TargetMachine &SourceTM, std::string *out
             jl_safe_printf("ERROR: target does not support generation of object files\n");
         emitter.run(M);
         *outputs = { Buffer.data(), Buffer.size() };
-        outputs++;
-        *outputs = (name + ".o").str();
-        *obj = NewArchiveMember(MemoryBufferRef(outputs[-1], *outputs));
+        *obj = NewArchiveMember(MemoryBufferRef(*outputs, names[2]));
         outputs++;
     }
 
@@ -880,9 +886,7 @@ static void add_output_impl(Module &M, TargetMachine &SourceTM, std::string *out
             jl_safe_printf("ERROR: target does not support generation of assembly files\n");
         emitter.run(M);
         *outputs = { Buffer.data(), Buffer.size() };
-        outputs++;
-        *outputs = (name + ".s").str();
-        *asm_ = NewArchiveMember(MemoryBufferRef(outputs[-1], *outputs));
+        *asm_ = NewArchiveMember(MemoryBufferRef(*outputs, names[3]));
         outputs++;
     }
 }
@@ -1009,7 +1013,7 @@ static void dropUnusedDeclarations(Module &M) {
         G->eraseFromParent();
 }
 
-static void add_output(Module &M, TargetMachine &TM, std::vector<std::string> &outputs, StringRef name,
+static void add_output(Module &M, TargetMachine &TM, std::vector<std::string> &outputs, ArrayRef<StringRef> names,
                 std::vector<NewArchiveMember> &unopt, std::vector<NewArchiveMember> &opt,
                 std::vector<NewArchiveMember> &obj, std::vector<NewArchiveMember> &asm_,
                 bool unopt_out, bool opt_out, bool obj_out, bool asm_out,
@@ -1017,7 +1021,7 @@ static void add_output(Module &M, TargetMachine &TM, std::vector<std::string> &o
     uint64_t start = 0, end = 0;
     unsigned outcount = unopt_out + opt_out + obj_out + asm_out;
     assert(outcount);
-    outputs.resize(outputs.size() + outcount * threads * 2);
+    outputs.resize(outputs.size() + outcount * threads);
     unopt.resize(unopt.size() + unopt_out * threads);
     opt.resize(opt.size() + opt_out * threads);
     obj.resize(obj.size() + obj_out * threads);
@@ -1025,7 +1029,7 @@ static void add_output(Module &M, TargetMachine &TM, std::vector<std::string> &o
     if (threads == 1) {
         start = jl_hrtime();
         std::stringstream stream;
-        add_output_impl(M, TM, outputs.data() + outputs.size() - outcount * 2, name,
+        add_output_impl(M, TM, outputs.data() + outputs.size() - outcount, names,
                         unopt_out ? unopt.data() + unopt.size() - 1 : nullptr,
                         opt_out ? opt.data() + opt.size() - 1 : nullptr,
                         obj_out ? obj.data() + obj.size() - 1 : nullptr,
@@ -1052,7 +1056,7 @@ static void add_output(Module &M, TargetMachine &TM, std::vector<std::string> &o
     end = jl_hrtime();
     dbgs() << "Time to serialize module: " << (end - start) / 1e9 << "s\n";
 
-    auto outstart = outputs.data() + outputs.size() - outcount * threads * 2;
+    auto outstart = outputs.data() + outputs.size() - outcount * threads;
     auto unoptstart = unopt_out ? unopt.data() + unopt.size() - threads : nullptr;
     auto optstart = opt_out ? opt.data() + opt.size() - threads : nullptr;
     auto objstart = obj_out ? obj.data() + obj.size() - threads : nullptr;
@@ -1091,7 +1095,7 @@ static void add_output(Module &M, TargetMachine &TM, std::vector<std::string> &o
             stderrs[i] << "Declaration deletion time for shard " << i << ": " << (end - start) / 1e9 << "s\n";
 
             start = jl_hrtime();
-            add_output_impl(*M, TM, outstart + i * outcount * 2, name,
+            add_output_impl(*M, TM, outstart + i * outcount, names,
                             unoptstart ? unoptstart + i : nullptr,
                             optstart ? optstart + i : nullptr,
                             objstart ? objstart + i : nullptr,
@@ -1313,14 +1317,21 @@ void jl_dump_native_impl(void *native_code,
 
     start = jl_hrtime();
 
-    auto compile = [&](Module &M, StringRef name, unsigned threads) { add_output(
-            M, *SourceTM, outputs, name,
+    auto compile = [&](Module &M, ArrayRef<StringRef> names, unsigned threads) { add_output(
+            M, *SourceTM, outputs, names,
             unopt_bc_Archive, bc_Archive, obj_Archive, asm_Archive,
             !!unopt_bc_fname, !!bc_fname, !!obj_fname, !!asm_fname,
             threads
     ); };
+    
+    std::array<StringRef, 4> text_names = {
+        "text_unopt.bc",
+        "text_opt.bc",
+        "text.o",
+        "text.s"
+    };
 
-    compile(*dataM, "text", threads);
+    compile(*dataM, text_names, threads);
 
     end = jl_hrtime();
 
@@ -1417,7 +1428,14 @@ void jl_dump_native_impl(void *native_code,
             ios_write(s, (const char *)data.data(), data.size());
         }
     }
-    compile(*sysimageM, "data", 1);
+
+    std::array<StringRef, 4> data_names = {
+        "data_unopt.bc",
+        "data_opt.bc",
+        "data.o",
+        "data.s"
+    };
+    compile(*sysimageM, data_names, 1);
 
     end = jl_hrtime();
 
