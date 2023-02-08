@@ -573,7 +573,7 @@ function abstract_call_method(interp::AbstractInterpreter, method::Method, @nosp
                 break
             end
             topmost === nothing || continue
-            if edge_matches_sv(infstate, method, sig, sparams, hardlimit, sv)
+            if edge_matches_sv(interp, infstate, method, sig, sparams, hardlimit, sv)
                 topmost = infstate
                 edgecycle = true
             end
@@ -681,12 +681,13 @@ function abstract_call_method(interp::AbstractInterpreter, method::Method, @nosp
     return MethodCallResult(rt, edgecycle, edgelimited, edge, effects)
 end
 
-function edge_matches_sv(frame::InferenceState, method::Method, @nospecialize(sig), sparams::SimpleVector, hardlimit::Bool, sv::InferenceState)
+function edge_matches_sv(interp::AbstractInterpreter, frame::InferenceState, method::Method, @nospecialize(sig), sparams::SimpleVector, hardlimit::Bool, sv::InferenceState)
     # The `method_for_inference_heuristics` will expand the given method's generator if
     # necessary in order to retrieve this field from the generated `CodeInfo`, if it exists.
     # The other `CodeInfo`s we inspect will already have this field inflated, so we just
     # access it directly instead (to avoid regeneration).
-    callee_method2 = method_for_inference_heuristics(method, sig, sparams) # Union{Method, Nothing}
+    world = get_world_counter(interp)
+    callee_method2 = method_for_inference_heuristics(method, sig, sparams, world) # Union{Method, Nothing}
 
     inf_method2 = frame.src.method_for_inference_limit_heuristics # limit only if user token match
     inf_method2 isa Method || (inf_method2 = nothing)
@@ -723,11 +724,11 @@ function edge_matches_sv(frame::InferenceState, method::Method, @nospecialize(si
 end
 
 # This function is used for computing alternate limit heuristics
-function method_for_inference_heuristics(method::Method, @nospecialize(sig), sparams::SimpleVector)
-    if isdefined(method, :generator) && method.generator.expand_early && may_invoke_generator(method, sig, sparams)
+function method_for_inference_heuristics(method::Method, @nospecialize(sig), sparams::SimpleVector, world::UInt)
+    if isdefined(method, :generator) && !(method.generator isa Core.GeneratedFunctionStub) && may_invoke_generator(method, sig, sparams)
         method_instance = specialize_method(method, sig, sparams)
         if isa(method_instance, MethodInstance)
-            cinfo = get_staged(method_instance)
+            cinfo = get_staged(method_instance, world)
             if isa(cinfo, CodeInfo)
                 method2 = cinfo.method_for_inference_limit_heuristics
                 if method2 isa Method
@@ -791,24 +792,25 @@ end
 function pure_eval_eligible(interp::AbstractInterpreter,
     @nospecialize(f), applicable::Vector{Any}, arginfo::ArgInfo)
     # XXX we need to check that this pure function doesn't call any overlayed method
+    world = get_world_counter(interp)
     return f !== nothing &&
            length(applicable) == 1 &&
-           is_method_pure(applicable[1]::MethodMatch) &&
+           is_method_pure(applicable[1]::MethodMatch, world) &&
            is_all_const_arg(arginfo, #=start=#2)
 end
 
-function is_method_pure(method::Method, @nospecialize(sig), sparams::SimpleVector)
+function is_method_pure(method::Method, @nospecialize(sig), sparams::SimpleVector, world::UInt)
     if isdefined(method, :generator)
-        method.generator.expand_early || return false
+        method.generator isa Core.GeneratedFunctionStub && return false
         mi = specialize_method(method, sig, sparams)
         isa(mi, MethodInstance) || return false
-        staged = get_staged(mi)
+        staged = get_staged(mi, world)
         (staged isa CodeInfo && (staged::CodeInfo).pure) || return false
         return true
     end
     return method.pure
 end
-is_method_pure(match::MethodMatch) = is_method_pure(match.method, match.spec_types, match.sparams)
+is_method_pure(match::MethodMatch, world::UInt) = is_method_pure(match.method, match.spec_types, match.sparams, world)
 
 function pure_eval_call(interp::AbstractInterpreter,
     @nospecialize(f), applicable::Vector{Any}, arginfo::ArgInfo)
