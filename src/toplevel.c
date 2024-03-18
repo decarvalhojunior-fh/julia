@@ -82,7 +82,7 @@ void jl_module_run_initializer(jl_module_t *m)
         }
         else {
             jl_rethrow_other(jl_new_struct(jl_initerror_type, m->name,
-                                           jl_current_exception()));
+                                           jl_current_exception(ct)));
         }
     }
 }
@@ -929,7 +929,7 @@ jl_value_t *jl_toplevel_eval_flex(jl_module_t *JL_NONNULL m, jl_value_t *e, int 
         size_t world = jl_atomic_load_acquire(&jl_world_counter);
         ct->world_age = world;
         if (!has_defs && jl_get_module_infer(m) != 0) {
-            (void)jl_type_infer(mfunc, world, 0);
+            (void)jl_type_infer(mfunc, world, 0, SOURCE_MODE_NOT_REQUIRED);
         }
         result = jl_invoke(/*func*/NULL, /*args*/NULL, /*nargs*/0, mfunc);
         ct->world_age = last_age;
@@ -1010,10 +1010,10 @@ JL_DLLEXPORT jl_value_t *jl_infer_thunk(jl_code_info_t *thk, jl_module_t *m)
     JL_GC_PUSH1(&li);
     jl_resolve_globals_in_ir((jl_array_t*)thk->code, m, NULL, 0);
     jl_task_t *ct = jl_current_task;
-    jl_code_info_t *src = jl_type_infer(li, ct->world_age, 0);
+    jl_code_instance_t *ci = jl_type_infer(li, ct->world_age, 0, SOURCE_MODE_NOT_REQUIRED);
     JL_GC_POP();
-    if (src)
-        return src->rettype;
+    if (ci)
+        return ci->rettype;
     return (jl_value_t*)jl_any_type;
 }
 
@@ -1081,7 +1081,7 @@ finally:
             jl_rethrow();
         else
             jl_rethrow_other(jl_new_struct(jl_loaderror_type, filename, result,
-                                           jl_current_exception()));
+                                           jl_current_exception(ct)));
     }
     JL_GC_POP();
     return result;
